@@ -8,8 +8,7 @@ Department of Biostatistics and Health Informatics, Institute of Psychiatry, Psy
 
 Please contact yiyang.ge@kcl.ac.uk for queries.
 
-About
-This repository provides a pipeline for missing data imputation quality evaluation:
+This repository provides a pipeline for missing data imputation quality evaluation.
 
 Background:
 Depression remains a leading cause of disability worldwide, robust clinical studies is necessary to assess treatment responses. Many studies provide a significant data source for understanding treatment effectiveness. 

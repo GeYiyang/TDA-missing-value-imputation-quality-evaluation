@@ -54,7 +54,7 @@ pip install -r requirements.txt
 python TDA_pipeline_kmeans_pca.py
 
 ```
-Outputs
+## Outputs
 Summary CSV, Markdown report, and full PKL are saved to:
 run_reports/
 

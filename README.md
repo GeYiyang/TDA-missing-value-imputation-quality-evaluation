@@ -62,10 +62,8 @@ Temporary caches for parallel computations are stored in:
 cache/
 Both folders are ignored by Git to keep the repository lightweight.
 
+## Repository Structure
 ```
-
-Repository Structure
-bash
 tda-imputation-mapper/
 ├── TDA_pipeline_kmeans_pca.py   # Main analysis pipeline
 ├── requirements.txt             # Dependencies

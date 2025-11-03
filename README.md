@@ -82,4 +82,4 @@ This project is released under the MIT License.
 
 ## Contact
 Yiyang Ge
-Email: yiyang.ge.0@kcl.ac.uk
+**Email:** yiyang.ge.0@kcl.ac.uk

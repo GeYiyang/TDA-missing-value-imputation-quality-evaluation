@@ -51,29 +51,29 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 
-python mapper_perm_english.py
-Outputs (summary CSV, Markdown report, full PKL) will be saved to:
-
+python TDA_pipeline_kmeans_pca.py
+Outputs
+Summary CSV, Markdown report, and full PKL are saved to:
 run_reports/
-Temporary caches for parallel computations are stored in:
 
+Temporary caches for parallel computations are stored in:
 cache/
 Both folders are ignored by Git to keep the repository lightweight.
 
-📂 Repository Structure
+Repository Structure
+bash
 tda-imputation-mapper/
-├── TDA_pipeline_kmeans_pca.py  # Main analysis pipeline
-├── requirements.txt            # Dependencies
-├── README.md                   # Project documentation
-├── .gitignore                  # Ignore cache & results
-├── run_reports/ (ignored)      # Output reports
-└── cache/ (ignored)            # Temporary computation cache
+├── TDA_pipeline_kmeans_pca.py   # Main analysis pipeline
+├── requirements.txt             # Dependencies
+├── README.md                    # Project documentation
+├── .gitignore                   # Ignore cache & results
+├── run_reports/ (ignored)       # Output reports
+└── cache/ (ignored)             # Temporary computation cache
 
-##
-
-📜 License
+License
 This project is released under the MIT License.
 
-💬 Contact
-Yiyang Ge
+Contact
+Author: Yiyang Ge
 Email: yiyang.ge.0@kcl.ac.uk
+---

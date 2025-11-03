@@ -4,7 +4,7 @@ This repository provides a **reproducible pipeline** for evaluating the quality 
 
 ---
 
-## 📖 Background
+## Background
 
 Depression remains one of the leading causes of disability worldwide, highlighting the need for **robust clinical studies** to accurately assess treatment responses.  
 Large-scale clinical datasets offer valuable opportunities to understand treatment effectiveness; however, **missing data** presents a major challenge to drawing reliable conclusions.
@@ -14,7 +14,7 @@ By examining the **topological structures** of complete and imputed datasets, th
 
 ---
 
-## ⚙️ Pipeline Overview
+## Pipeline Overview
 
 The pipeline compares two datasets:
 - **Complete-case dataset** – the ground truth (no missing values)
@@ -29,7 +29,7 @@ It performs:
 
 ---
 
-## 🧮 Input Format
+## Input Format
 
 - Expected input files (CSV format):
 complete_case.csv
@@ -82,4 +82,5 @@ This project is released under the MIT License.
 
 ## Contact
 Yiyang Ge
-**Email:** yiyang.ge.0@kcl.ac.uk
+
+Email: yiyang.ge.0@kcl.ac.uk

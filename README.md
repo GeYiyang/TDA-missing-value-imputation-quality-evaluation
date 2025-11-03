@@ -69,6 +69,8 @@ tda-imputation-mapper/
 ├── run_reports/ (ignored)      # Output reports
 └── cache/ (ignored)            # Temporary computation cache
 
+##
+
 📜 License
 This project is released under the MIT License.
 

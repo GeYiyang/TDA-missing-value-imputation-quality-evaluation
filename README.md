@@ -76,12 +76,10 @@ tda-imputation-mapper/
 
 ```
 
-License
+License:
 This project is released under the MIT License.
 
-```
 
-Contact
+Contact:
 Author: Yiyang Ge
 Email: yiyang.ge.0@kcl.ac.uk
----

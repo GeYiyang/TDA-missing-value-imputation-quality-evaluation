@@ -1,0 +1,494 @@
+# -*- coding: utf-8 -*-
+"""
+
+Author: Yiyang Ge
+"""
+
+import os
+import random
+import pickle
+import warnings
+import json
+import datetime
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import pairwise_distances
+from sklearn.manifold import MDS
+from sklearn.cluster import DBSCAN
+
+from gudhi.cover_complex import MapperComplex
+from gudhi import bottleneck_distance
+
+import networkx as nx
+from scipy.sparse.csgraph import connected_components, dijkstra
+
+from joblib import Parallel, delayed
+
+# --- Lock low-level threads to avoid nested parallelism blow-up --- #
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
+warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn")
+np.random.seed(100)
+random.seed(100)
+
+# =========================================================
+# Cache & report utilities
+# =========================================================
+CACHE_DIR = "cache"
+Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
+
+def save_cache(obj, name):
+    with open(os.path.join(CACHE_DIR, name + ".pkl"), "wb") as f:
+        pickle.dump(obj, f)
+
+def load_cache(name):
+    pth = os.path.join(CACHE_DIR, name + ".pkl")
+    if os.path.exists(pth):
+        with open(pth, "rb") as f:
+            return pickle.load(f)
+    return None
+
+def _flatten_results_for_df(results: dict) -> pd.DataFrame:
+    """Compact table view of results (exclude large arrays)."""
+    rows = []
+    for (res, gain), d in results.items():
+        row = {
+            "res": res,
+            "gain": gain,
+            "Tobs_max": float(d["Tobs_max"]),
+            "p_max": float(d["p_max"]),
+        }
+        parts = d.get("Tobs_parts", {})
+        pparts = d.get("p_parts", {})
+        for topo in ["connected_components", "downbranch", "upbranch", "loop"]:
+            row[f"Tobs_{topo}"] = float(parts.get(topo, np.nan))
+            row[f"p_{topo}"] = float(pparts.get(topo, np.nan))
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values(["res", "gain"]).reset_index(drop=True)
+    return df
+
+def write_run_reports(results: dict,
+                      meta: dict = None,
+                      out_dir: str = "run_reports",
+                      basename: str = "mapper_dbscan_perm"):
+    """
+    Write a one-shot report bundle:
+      1) CSV summary (compact)
+      2) Full pickle (includes permutation distributions)
+      3) Simple Markdown report with a small table
+      4) A .DONE flag file indicating successful completion
+    """
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    stem = f"{basename}_{ts}"
+
+    df = _flatten_results_for_df(results)
+    csv_path = Path(out_dir) / f"{stem}.csv"
+    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+    pkl_path = Path(out_dir) / f"{stem}.pkl"
+    with open(pkl_path, "wb") as f:
+        pickle.dump({"results": results, "meta": meta or {}}, f)
+
+    md_path = Path(out_dir) / f"{stem}.md"
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write("# DBSCAN-Mapper Run Report\n\n")
+        f.write(f"- Generated at: {ts}\n")
+        if meta:
+            f.write(f"- Parameter summary: {json.dumps(meta, ensure_ascii=True)}\n")
+        f.write(f"- Summary CSV: `{csv_path.name}`\n")
+        f.write(f"- Full results PKL: `{pkl_path.name}`\n\n")
+        if not df.empty:
+            cols = ["res","gain","Tobs_max","p_max",
+                    "Tobs_connected_components","p_connected_components",
+                    "Tobs_downbranch","p_downbranch",
+                    "Tobs_upbranch","p_upbranch",
+                    "Tobs_loop","p_loop"]
+            cols = [c for c in cols if c in df.columns]
+            f.write("| " + " | ".join(cols) + " |\n")
+            f.write("|" + " --- |"*len(cols) + "\n")
+            for _, r in df.iterrows():
+                f.write("| " + " | ".join(str(r.get(c, "")) for c in cols) + " |\n")
+
+    with open(Path(out_dir) / f"{stem}.DONE", "w") as f:
+        f.write("OK\n")
+
+    print(f"[REPORT] Written: {csv_path} / {md_path} / {pkl_path}")
+
+def safe_dump_partial(results_partial: dict,
+                      out_dir: str = "run_reports",
+                      tag: str = "partial"):
+    """Best-effort partial dump to recover intermediate results on exceptions."""
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = Path(out_dir) / f"partial_{tag}_{ts}.pkl"
+    try:
+        with open(path, "wb") as f:
+            pickle.dump(results_partial, f)
+        print(f"[REPORT] Partial results saved: {path}")
+    except Exception:
+        pass
+
+# =========================================================
+# 1) Pooled preprocessing: StandardScaler -> distances -> MDS filter(s)
+# =========================================================
+def preprocess_pool(A: pd.DataFrame, B: pd.DataFrame, mds_dim=2, mds_random_state=0):
+    """
+    Standardize on A∪B, compute pairwise Euclidean distances and MDS filters.
+    Returns:
+        pool_df, gmat, fil, idx_A, idx_B
+    Note: For large n, dense gmat consumes O(n^2) memory; consider sampling.
+    """
+    n1, n2 = len(A), len(B)
+    pool_df = pd.concat([A, B], axis=0, ignore_index=True)
+
+    scaler = StandardScaler().fit(pool_df)
+    pool_scaled = scaler.transform(pool_df).astype(np.float32)
+
+    gmat = pairwise_distances(pool_scaled, metric="euclidean")
+    # Convert to float32 to reduce memory footprint (DBSCAN accepts float32)
+    if gmat.dtype != np.float32:
+        gmat = gmat.astype(np.float32, copy=False)
+
+    fil = MDS(n_components=mds_dim, dissimilarity="precomputed",
+              random_state=mds_random_state).fit_transform(gmat)
+    if fil.ndim == 1:
+        fil = fil.reshape(-1, 1)
+    fil = fil.astype(np.float32, copy=False)
+
+    idx_A = np.arange(0, n1, dtype=int)
+    idx_B = np.arange(n1, n1 + n2, dtype=int)
+    return pool_df, gmat, fil, idx_A, idx_B
+
+# =========================================================
+# 2) Build Mapper on sub-indices (reuse global gmat/fil)
+# =========================================================
+def build_mapper_from_indices(gmat_full, fil_full, idx, res, gain,
+                              eps=0.4, min_samples=5):
+    """
+    Build a Mapper graph on a subset of points using DBSCAN over the
+    precomputed distance submatrix and MDS filters.
+    """
+    sub_gmat = gmat_full[np.ix_(idx, idx)]
+    sub_fil  = fil_full[idx, :]
+
+    n_filters = sub_fil.shape[1]
+    # Let Mapper infer filter bounds from data (NaN means auto)
+    filter_bnds = np.full((n_filters, 2), np.nan, dtype=np.float32)
+
+    mapper = MapperComplex(
+        filter_bnds=filter_bnds,
+        resolutions=np.array([res] * n_filters, dtype=int),
+        gains=np.array([gain] * n_filters, dtype=float),
+        clustering=DBSCAN(metric='precomputed', eps=eps, min_samples=min_samples)
+    )
+    mapper.fit(sub_gmat, filters=sub_fil, colors=sub_fil, input_type="distance matrix")
+    return mapper, sub_fil
+
+# =========================================================
+# 3) statmapper-style features (connected_components / branches / loop)
+# =========================================================
+def _mapper2networkx_gudhi(M):
+    st = M.mapper_ if hasattr(M, "mapper_") else M.simplex_tree_
+    G = nx.Graph()
+    for (splx, _) in st.get_skeleton(1):
+        if len(splx) == 1:
+            G.add_node(splx[0])
+        elif len(splx) == 2:
+            G.add_edge(splx[0], splx[1])
+    return G
+
+def compute_topological_features_statmapper(M, func=None, func_type="data",
+                                            topo_type="downbranch", threshold=0.0):
+    """
+    Compatible re-implementation of statmapper.compute_topological_features for Gudhi.
+    Returns:
+        dgm: [(dim, (birth, death)), ...]
+        bnd: [list_of_node_indices, ...]
+    """
+    mapper = M.mapper_ if hasattr(M, "mapper_") else M.simplex_tree_
+    node_info = M.node_info_
+    num_nodes = len(node_info)
+
+    # If no function provided: use -eccentricity over the 1-skeleton
+    if func is None:
+        A = np.zeros((num_nodes, num_nodes), dtype=float)
+        for (splx, _) in mapper.get_skeleton(1):
+            if len(splx) == 2:
+                A[splx[0], splx[1]] = 1.0
+                A[splx[1], splx[0]] = 1.0
+        dij = dijkstra(A, directed=False)
+        D = np.where(np.isinf(dij), 0.0, dij)
+        func = list(-D.max(axis=1))
+        func_type = "node"
+
+    # data -> node aggregation
+    if func_type == "data":
+        function = [np.mean([func[i] for i in node_info[v]["indices"]]) for v in range(num_nodes)]
+    else:
+        function = list(func)
+
+    dgm, bnd = [], []
+
+    if topo_type == "connected_components":
+        A = np.zeros((num_nodes, num_nodes), dtype=float)
+        for (splx, _) in mapper.get_skeleton(1):
+            if len(splx) == 2:
+                A[splx[0], splx[1]] = 1.0
+                A[splx[1], splx[0]] = 1.0
+        _, labels = connected_components(A, directed=False)
+        for cc in np.unique(labels):
+            pts = np.where(labels == cc)[0]
+            vals = [function[p] for p in pts]
+            if abs(min(vals) - max(vals)) >= threshold:
+                dgm.append((0, (min(vals), max(vals))))
+                bnd.append(list(pts))
+
+    elif topo_type in ("downbranch", "upbranch"):
+        f = np.array(function, dtype=float)
+        if topo_type == "upbranch":
+            f = -f
+
+        A = np.zeros((num_nodes, num_nodes), dtype=float)
+        for (splx, _) in mapper.get_skeleton(1):
+            if len(splx) == 2:
+                A[splx[0], splx[1]] = 1.0
+                A[splx[1], splx[0]] = 1.0
+
+        order = np.argsort(f)
+        rank = np.empty(num_nodes, dtype=int); rank[order] = np.arange(num_nodes)
+
+        def find(i, parent):
+            return i if parent[i] == i else find(parent[i], parent)
+
+        def union(i, j, parent):
+            if f[i] <= f[j]:
+                parent[j] = i
+            else:
+                parent[i] = j
+
+        parent = -np.ones(num_nodes, dtype=int)
+        diag, comp, seen = {}, {}, {}
+
+        for t in range(num_nodes):
+            u = order[t]
+            nbrs = np.where(A[u, :] == 1.0)[0]
+            lower = [v for v in nbrs if rank[v] <= t] if nbrs.size > 0 else []
+            if not lower:
+                parent[u] = u
+                continue
+
+            neigh_pars = [find(v, parent) for v in lower]
+            g = neigh_pars[np.argmin([f[w] for w in neigh_pars])]
+            pg = find(g, parent)
+            parent[u] = pg
+
+            for v in lower:
+                pv = find(v, parent)
+                if pg != pv:
+                    pp = pg if f[pg] > f[pv] else pv
+                    comp[pp] = []
+                    for w in order[:t]:
+                        if find(w, parent) == pp and w not in seen:
+                            seen[w] = True
+                            comp[pp].append(w)
+                    comp[pp].append(u)
+                    if abs(f[pp] - f[u]) >= threshold:
+                        diag[pp] = u
+                    union(pg, pv, parent)
+                else:
+                    if len(nbrs) == len(lower):
+                        comp[pg] = []
+                        for w in order[:t+1]:
+                            if find(w, parent) == pg and w not in seen:
+                                seen[w] = True
+                                comp[pg].append(w)
+                        comp[pg].append(u)
+                        if abs(f[pg] - f[u]) >= threshold:
+                            diag[pg] = u
+
+        for key, val in diag.items():
+            if topo_type == "downbranch":
+                dgm.append((0, (f[key], f[val])))
+            else:
+                dgm.append((0, (-f[val], -f[key])))
+            bnd.append(comp[key])
+
+    elif topo_type == "loop":
+        G = _mapper2networkx_gudhi(M)
+        for pts in nx.cycle_basis(G):
+            vals = [function[p] for p in pts]
+            if abs(min(vals) - max(vals)) >= threshold:
+                dgm.append((1, (min(vals), max(vals))))
+                bnd.append(list(pts))
+
+    return dgm, bnd
+
+# =========================================================
+# 4) Bottleneck distance between two statmapper-style "diagrams"
+# =========================================================
+def bottleneck_statmapper(MF1, MF2, topo_type="connected_components"):
+    (M1, fil1), (M2, fil2) = MF1, MF2
+    f1 = fil1[:, 0] if fil1.ndim > 1 else fil1
+    f2 = fil2[:, 0] if fil2.ndim > 1 else fil2
+
+    dgm1, _ = compute_topological_features_statmapper(M1, func=f1, func_type="data", topo_type=topo_type)
+    dgm2, _ = compute_topological_features_statmapper(M2, func=f2, func_type="data", topo_type=topo_type)
+
+    D1 = np.array([[d[1][0], d[1][1]] for d in dgm1 if d[0] <= 1], dtype=float)
+    D2 = np.array([[d[1][0], d[1][1]] for d in dgm2 if d[0] <= 1], dtype=float)
+
+    if D1.size == 0 and D2.size == 0:
+        return 0.0
+    if D1.size == 0 or D2.size == 0:
+        return float('inf')
+    return float(bottleneck_distance(D1, D2))
+
+# =========================================================
+# 5) Diagnostics helpers
+# =========================================================
+TOPO_TYPES = ["connected_components", "downbranch", "upbranch", "loop"]
+
+def summarize_mapper(M, tag=""):
+    st = M.mapper_ if hasattr(M, "mapper_") else M.simplex_tree_
+    n_nodes = len(M.node_info_)
+    n_edges = sum(1 for (splx, _) in st.get_skeleton(1) if len(splx) == 2)
+    sizes = []
+    for k in M.node_info_.keys():
+        if "size" in M.node_info_[k]:
+            sizes.append(M.node_info_[k]["size"])
+        elif "indices" in M.node_info_[k]:
+            sizes.append(len(M.node_info_[k]["indices"]))
+    sizes = np.array(sizes) if sizes else np.array([0])
+    print(f"[DBG] {tag} nodes={n_nodes}, edges={n_edges}, node_size[min/med/max]={sizes.min()}/{np.median(sizes)}/{sizes.max()}")
+
+# =========================================================
+# 6) Permutation test (loky parallel backend)
+# =========================================================
+def _observed_stat_pair(gmat, fil, idx_A, idx_B, res, gain, eps, min_samples, verbose=True):
+    M_A, F_A = build_mapper_from_indices(gmat, fil, idx_A, res, gain, eps, min_samples)
+    M_B, F_B = build_mapper_from_indices(gmat, fil, idx_B, res, gain, eps, min_samples)
+    if verbose:
+        summarize_mapper(M_A, "A")
+        summarize_mapper(M_B, "B")
+    parts = [bottleneck_statmapper((M_A, F_A), (M_B, F_B), topo) for topo in TOPO_TYPES]
+    return max(parts), parts
+
+def _one_perm_job(seed, n, n1, gmat, fil, res, gain, eps, min_samples):
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(np.arange(n))
+    A_idx = perm[:n1]
+    B_idx = perm[n1:]
+    T, parts = _observed_stat_pair(gmat, fil, A_idx, B_idx, res, gain, eps, min_samples, verbose=False)
+    return T, parts
+
+def run_mapper_analysis_permutation_statmapper(
+    data1: pd.DataFrame,
+    data2: pd.DataFrame,
+    res_list, gain_list,
+    num_perm=99,
+    eps=0.4, min_samples=5,
+    mds_dim=2, mds_random_state=0,
+    n_jobs=1
+):
+    # ===== Preprocessing on the pooled set =====
+    pool_df, gmat, fil, idx_A, idx_B = preprocess_pool(data1, data2, mds_dim, mds_random_state)
+    n1, n2 = len(idx_A), len(idx_B)
+    n = n1 + n2
+    approx_mem_mb = (gmat.nbytes + fil.nbytes) / 1e6
+    print(f"[INFO] gmat shape={gmat.shape}, fil shape={fil.shape}, approx mem={approx_mem_mb:.1f} MB")
+
+    results = {}
+    for res in res_list:
+        for gain in gain_list:
+            print(f"\\n🔹 Processing res={res}, gain={gain}")
+
+            # Observed statistic
+            Tobs, parts_obs = _observed_stat_pair(gmat, fil, idx_A, idx_B, res, gain, eps, min_samples, verbose=True)
+            print(f"🟩 Observed (max over {TOPO_TYPES}): {Tobs:.4f}  parts={parts_obs}")
+
+            # Parallel permutations
+            try:
+                perm_stats = Parallel(
+                    n_jobs=n_jobs,
+                    backend="loky",
+                    max_nbytes="1M",
+                    temp_folder=CACHE_DIR,
+                    batch_size="auto",
+                    prefer="processes"
+                )(
+                    delayed(_one_perm_job)(seed, n, n1, gmat, fil, res, gain, eps, min_samples)
+                    for seed in range(num_perm)
+                )
+            except Exception as e:
+                # Dump partial results and re-raise
+                safe_dump_partial({"results_so_far": results, "error": str(e)})
+                raise
+
+            perm_T = np.array([t[0] for t in perm_stats])
+            perm_parts = np.array([t[1] for t in perm_stats])
+
+            p_max = (np.sum(perm_T >= Tobs) + 1) / (num_perm + 1)
+            p_parts = [
+                (np.sum(perm_parts[:, k] >= parts_obs[k]) + 1) / (num_perm + 1)
+                for k in range(len(TOPO_TYPES))
+            ]
+
+            print(f"🟥 p (unbiased): max={p_max:.4f}  parts="
+                  f"{dict(zip(TOPO_TYPES, [f'{x:.4f}' for x in p_parts]))}")
+
+            results[(res, gain)] = {
+                "Tobs_max": float(Tobs),
+                "Tobs_parts": dict(zip(TOPO_TYPES, map(float, parts_obs))),
+                "perm_T": perm_T,
+                "perm_parts": perm_parts,
+                "p_max": float(p_max),
+                "p_parts": dict(zip(TOPO_TYPES, map(float, p_parts))),
+            }
+
+    return results
+
+# =========================
+# Main entry (filenames/parameters can be adjusted)
+# =========================
+if __name__ == "__main__":
+    # Example files; replace with your own
+    data1 = pd.read_csv("FM_complete_case.csv")
+    data2 = pd.read_csv("FMMCAR20_KNN.csv")  # example imputed data
+
+    res_list = [8, 10, 12]
+    gain_list = [0.1, 0.2, 0.3, 0.4]
+
+    results = run_mapper_analysis_permutation_statmapper(
+        data1, data2,
+        res_list, gain_list,
+        num_perm=499,            
+        eps=0.4, min_samples=5,
+        mds_dim=2, mds_random_state=0,
+        n_jobs=6
+    )
+
+    # Generate reports (CSV/MD/PKL + DONE)
+    write_run_reports(
+        results,
+        meta={
+            "num_perm": 199,
+            "eps": 0.4,
+            "min_samples": 5,
+            "mds_dim": 2,
+            "n_jobs": 6,
+            "res_list": res_list,
+            "gain_list": gain_list
+        },
+        out_dir="run_reports",
+        basename="mapper_dbscan_perm"
+    )

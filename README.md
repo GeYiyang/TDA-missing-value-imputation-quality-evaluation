@@ -52,6 +52,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 python TDA_pipeline_kmeans_pca.py
+
+```
 Outputs
 Summary CSV, Markdown report, and full PKL are saved to:
 run_reports/
@@ -59,6 +61,8 @@ run_reports/
 Temporary caches for parallel computations are stored in:
 cache/
 Both folders are ignored by Git to keep the repository lightweight.
+
+```
 
 Repository Structure
 bash
@@ -70,8 +74,12 @@ tda-imputation-mapper/
 ├── run_reports/ (ignored)       # Output reports
 └── cache/ (ignored)             # Temporary computation cache
 
+```
+
 License
 This project is released under the MIT License.
+
+```
 
 Contact
 Author: Yiyang Ge

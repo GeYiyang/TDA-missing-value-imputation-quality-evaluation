@@ -9,6 +9,7 @@ This repository provides a **reproducible pipeline** for evaluating the quality 
 Large-scale clinical datasets offer valuable opportunities to understand treatment effectiveness; however, **missing data** presents a major challenge to drawing reliable conclusions.
 
 This project applies **Topological Data Analysis (TDA)** to quantitatively assess and compare different imputation strategies.  
+
 By examining the **topological structures** of complete and imputed datasets, the pipeline evaluates how well the imputed data preserves the intrinsic geometry of the original dataset—an essential step in ensuring the **integrity and reproducibility** of clinical research findings.
 
 ---

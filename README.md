@@ -6,7 +6,6 @@ This repository provides a **reproducible pipeline** for evaluating the quality 
 
 ## Background
 
-Depression remains one of the leading causes of disability worldwide, highlighting the need for **robust clinical studies** to accurately assess treatment responses.  
 Large-scale clinical datasets offer valuable opportunities to understand treatment effectiveness; however, **missing data** presents a major challenge to drawing reliable conclusions.
 
 This project applies **Topological Data Analysis (TDA)** to quantitatively assess and compare different imputation strategies.  
@@ -17,7 +16,7 @@ By examining the **topological structures** of complete and imputed datasets, th
 ## Pipeline Overview
 
 The pipeline compares two datasets:
-- **Complete-case dataset** – the ground truth (no missing values)
+- **Complete-case dataset** – no missing values
 - **Imputed dataset** – after missing-value imputation
 
 It performs:
@@ -82,3 +81,7 @@ This project is released under the MIT License.
 Yiyang Ge
 
 Email: yiyang.ge.0@kcl.ac.uk
+
+Raquel Iniesta
+
+Email: raquel.iniesta@kcl.ac.uk

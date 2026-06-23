@@ -1,4 +1,10 @@
-# TDA-Based Pipeline for Missing Data Imputation Quality Evaluation
+<p align="center">
+  <img src="TDAssure.png" width="220">
+</p>
+
+# TDAssure
+
+TDA-Based Pipeline for Missing Data Imputation Quality Evaluation
 
 This repository provides a **reproducible pipeline** for evaluating the quality of missing-data imputation using **Topological Data Analysis (TDA)**, specifically the **Mapper algorithm** and **permutation-based statistical testing**.
 
